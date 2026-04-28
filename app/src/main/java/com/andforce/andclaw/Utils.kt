@@ -201,7 +201,8 @@ Swipe left: x:900, y:1000, end_x:100, end_y:1000
 Long press at (x,y). Optional "duration" in ms (default 1000).
 
 === TEXT_INPUT ===
-Type text into the active input field. First click the input field, then use text_input.
+Type text into a text field. The system automatically handles focus — do NOT click the field first.
+Just issue text_input directly; the system will focus the field and enter the text for you.
 Works in both native apps AND browsers/WebView pages.
 Example: {"type":"text_input","text":"Hello World"}
 
@@ -279,7 +280,7 @@ $dpmSection
 1. Use "intent" first if a direct shortcut exists.
 2. Use "click" for on-screen UI elements.
 3. Use "swipe" for scrolling or page navigation.
-4. Use "text_input" to fill text fields (click the field first, then type). This works in both native apps and browsers.
+4. Use "text_input" to fill text fields directly — do NOT click the field first, the system handles focus automatically. This works in both native apps and browsers.
 5. Use "global_action" for system navigation (back, home, etc.).
 6. BROWSER/WEBVIEW: When a screenshot is attached and shows a browser or web page, the UI tree text may be incomplete or inaccurate. ALWAYS trust the screenshot over the UI tree for determining page content and element positions. In browser pages, after clicking an input field, use "text_input" to type — the system handles browser input automatically.
 7. Use "download" to download files directly — do NOT open a browser just to download.
@@ -448,7 +449,7 @@ CRITICAL: Your entire response must be parseable as JSON. Any non-JSON text will
                 val sw = metrics.widthPixels
                 val sh = metrics.heightPixels
 
-                """Current Screen UI (each element: {t:'text',xy:[cx,cy],c:1 if clickable} — xy is center coords for click):
+                """Current Screen UI (each element: {t:'text',xy:[cx,cy],c:1=clickable,e:1=editable/input,f:1=focused} — xy is center coords for click. If e:1,f:1 both present, the input field is already focused and keyboard is open — use text_input directly without clicking again):
 $screenData
 
 IMPORTANT — SCREENSHOT ATTACHED (Screen resolution: ${sw}x${sh} pixels)
@@ -456,11 +457,11 @@ The attached screenshot shows the ACTUAL screen content. The text UI tree above 
 The screenshot maps 1:1 to screen pixel coordinates: top-left is (0,0), bottom-right is ($sw,$sh).
 To determine click coordinates, visually locate the target element in the screenshot and estimate its CENTER position in pixels.
 For example, if a close button "X" appears at roughly the upper-right area of a popup, estimate its pixel position carefully.
-BROWSER/WEBVIEW NOTE: If the screenshot shows a browser or web page, rely on the screenshot to understand page layout. For search boxes or input fields in web pages, click the field first, then use "text_input" to type. The system handles browser input automatically.
+BROWSER/WEBVIEW NOTE: If the screenshot shows a browser or web page, rely on the screenshot to understand page layout. For search boxes or input fields in web pages, use "text_input" directly — do NOT click the field first, the system handles focus automatically.
 Respond with JSON only."""
             }
             else
-                "Current Screen UI (each element: {t:'text',xy:[cx,cy],c:1 if clickable} — xy is center coords for click):\n$screenData\n\nPerform the next step. Respond with JSON only."
+                "Current Screen UI (each element: {t:'text',xy:[cx,cy],c:1=clickable,e:1=editable/input,f:1=focused} — xy is center coords for click. If e:1,f:1 both present, the input field is already focused and keyboard is open — use text_input directly without clicking again):\n$screenData\n\nPerform the next step. Respond with JSON only."
 
             if (isKimi) {
                 val kimiMessages = mutableListOf<KimiMessage>()

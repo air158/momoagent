@@ -598,8 +598,13 @@ object AgentController : ITgBridgeService, IAiConfigService {
                             val result = withContext(Dispatchers.Main) {
                                 svc.inputText(action.text)
                             }
-                            success = result
-                            if (!result) outputMsg = "No focused input field found"
+                            if (result) {
+                                success = true
+                            } else {
+                                // Feed failure back to AI rather than stopping, so it can try another approach
+                                success = true
+                                outputMsg = "text_input failed: no editable field found or focus failed. Try clicking the input field first or use a different approach."
+                            }
                         }
                     }
 
@@ -1003,14 +1008,23 @@ object AgentController : ITgBridgeService, IAiConfigService {
         return suspendCancellableCoroutine { cont ->
             svc.captureScreenshot { bitmap ->
                 if (bitmap != null) {
+                    val scaled = scaleBitmapToMaxWidth(bitmap, 720)
                     val baos = ByteArrayOutputStream()
-                    bitmap.compress(Bitmap.CompressFormat.JPEG, 80, baos)
+                    scaled.compress(Bitmap.CompressFormat.JPEG, 60, baos)
+                    if (scaled !== bitmap) scaled.recycle()
                     cont.resume(Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP))
                 } else {
                     cont.resume(null)
                 }
             }
         }
+    }
+
+    private fun scaleBitmapToMaxWidth(bitmap: Bitmap, maxWidth: Int): Bitmap {
+        if (bitmap.width <= maxWidth) return bitmap
+        val scale = maxWidth.toFloat() / bitmap.width
+        val newHeight = (bitmap.height * scale).toInt()
+        return Bitmap.createScaledBitmap(bitmap, maxWidth, newHeight, true)
     }
 
     fun addMessage(role: String, content: String, action: AiAction? = null, screenshotBase64: String? = null) {

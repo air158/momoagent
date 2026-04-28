@@ -56,17 +56,21 @@ class AgentAccessibilityService : AccessibilityService() {
 
     private fun parseNode(node: AccessibilityNodeInfo?, sb: StringBuilder, sw: Int = 9999, sh: Int = 9999) {
         node ?: return
-        if (node.isClickable || !node.text.isNullOrEmpty()) {
+        val text = node.text?.toString()
+        val desc = node.contentDescription?.toString()
+        val label = if (!text.isNullOrEmpty()) text else desc
+        if (node.isClickable || !label.isNullOrEmpty()) {
             val rect = Rect()
             node.getBoundsInScreen(rect)
             if (rect.right > 0 && rect.bottom > 0 && rect.left < sw && rect.top < sh) {
                 val cx = (rect.left + rect.right) / 2
                 val cy = (rect.top + rect.bottom) / 2
-                val text = node.text?.toString()
                 sb.append("{")
-                if (!text.isNullOrEmpty()) sb.append("t:'${text.replace("'", "\\'")}',")
+                if (!label.isNullOrEmpty()) sb.append("t:'${label.replace("'", "\\'")}',")
                 sb.append("xy:[$cx,$cy]")
                 if (node.isClickable) sb.append(",c:1")
+                if (node.isEditable) sb.append(",e:1")
+                if (node.isFocused) sb.append(",f:1")
                 sb.append("}\n")
             }
         }
@@ -140,6 +144,7 @@ class AgentAccessibilityService : AccessibilityService() {
         if (root != null) {
             val editableNode = findEditableNode(root)
             if (editableNode != null) {
+                if (!editableNode.isFocused) editableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 if (editableNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) return true
                 val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
                 clipboard.setPrimaryClip(ClipData.newPlainText("input", text))

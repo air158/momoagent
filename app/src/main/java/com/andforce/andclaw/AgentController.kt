@@ -360,13 +360,22 @@ object AgentController : ITgBridgeService, IAiConfigService {
         syncLegacyTgChatIdFromSession(null)
     }
 
-    private suspend fun executeAgentStep(userInput: String, screenshotBase64: String? = null) {
+    private suspend fun executeAgentStep(
+        userInput: String,
+        screenshotBase64: String? = null,
+        loopWarning: String? = null,
+    ) {
         if (!isAgentRunning) return
 
         RemoteOutboundHelper.sendTyping(remoteBridge, activeRemoteSession)
 
         val svc = AgentAccessibilityService.instance
-        val screenData = svc?.captureScreenHierarchy() ?: "Screen data inaccessible"
+        val baseScreenData = svc?.captureScreenHierarchy() ?: "Screen data inaccessible"
+        val screenData = if (loopWarning != null) {
+            "$baseScreenData\n\n[系统警告] $loopWarning"
+        } else {
+            baseScreenData
+        }
 
         var finalScreenshot = screenshotBase64
         if (finalScreenshot == null && svc?.isWebViewContext() == true) {
@@ -401,7 +410,7 @@ object AgentController : ITgBridgeService, IAiConfigService {
 
         try {
             val isDeviceOwner = Util.isDeviceOwner(appContext)
-            Log.d(TAG, "executeAgentStep: calling LLM, provider=${config.provider}, apiKey=${Utils.maskKey(config.apiKey)}, historySize=${historyContext.size}, hasScreenshot=${finalScreenshot != null}")
+            Log.d(TAG, "executeAgentStep: calling LLM, provider=${config.provider}, apiKey=${Utils.maskKey(config.apiKey)}, historySize=${historyContext.size}, hasScreenshot=${finalScreenshot != null}, hasLoopWarning=${loopWarning != null}")
             var response = Utils.callLLMWithHistory(
                 userInput, screenData, historyContext, config, appContext,
                 isDeviceOwner = isDeviceOwner,
@@ -452,19 +461,35 @@ object AgentController : ITgBridgeService, IAiConfigService {
 
         // Catch both consecutive loops (A A A A) and alternating loops (A B A B A B A B)
         if (recentFingerprints.count { it == fingerprint } >= 4) {
-            loopRetryCount++
             recentFingerprints.clear()
 
-            if (loopRetryCount >= 3) {
-                addMessage("system", "Loop detected. Action [$fingerprint] repeated too many times. Agent stopped.")
-                stopAgent()
-                return
-            }
-
-            scope.launch {
-                val screenshot = captureScreenBase64()
-                addMessage("system", "Loop detected: [$fingerprint] repeated 4+ times in last 12 steps. Taking screenshot for visual analysis. (retry $loopRetryCount/3)", screenshotBase64 = screenshot)
-                executeAgentStep(uiState.userInput, screenshotBase64 = screenshot)
+            val actionDesc = describeRepeatedAction(action)
+            when (loopRetryCount) {
+                0 -> {
+                    // First time: embed warning directly into the UI tree context so the agent
+                    // sees it alongside the current screen state — not as a past history message.
+                    loopRetryCount++
+                    val warning = "你刚才重复执行了同一个动作多次：$actionDesc。" +
+                        "这个动作不能再继续执行。请重新分析当前界面，尝试完全不同的方法或路径来完成任务。"
+                    addMessage("system", "[循环检测] $warning")
+                    scope.launch { executeAgentStep(uiState.userInput, loopWarning = warning) }
+                }
+                1 -> {
+                    // Agent still repeating after the inline warning: escalate with screenshot.
+                    loopRetryCount++
+                    scope.launch {
+                        val screenshot = captureScreenBase64()
+                        val warning = "你在收到警告后仍然重复执行了：$actionDesc。" +
+                            "这个方法明确行不通，请根据以下截图重新观察界面，选择一条完全不同的操作路径。"
+                        addMessage("system", "[循环检测-第二次] $warning", screenshotBase64 = screenshot)
+                        executeAgentStep(uiState.userInput, screenshotBase64 = screenshot, loopWarning = warning)
+                    }
+                }
+                else -> {
+                    // Agent persists after screenshot warning: stop.
+                    addMessage("system", "Loop detected. \"$actionDesc\" repeated too many times even after warnings. Agent stopped.")
+                    stopAgent()
+                }
             }
             return
         }
@@ -483,9 +508,8 @@ object AgentController : ITgBridgeService, IAiConfigService {
                 } else {
                     addMessage("system", "App opened, checking next step...")
                     isAgentRunning = true
-                    AgentAccessibilityService.instance?.markActionStart()
                     scope.launch {
-                        AgentAccessibilityService.instance?.waitForUiStable(2500L) ?: delay(2500)
+                        AgentAccessibilityService.instance?.waitForUiSettle(2500L) ?: delay(2500)
                         executeAgentStep(uiState.userInput)
                     }
                 }
@@ -521,7 +545,7 @@ object AgentController : ITgBridgeService, IAiConfigService {
                 val waitMs = if (action.duration > 0) action.duration.coerceAtMost(5000) else 1500L
                 addMessage("system", "Waiting for UI update (max ${waitMs}ms)...")
                 scope.launch {
-                    AgentAccessibilityService.instance?.waitForUiStable(waitMs) ?: delay(waitMs)
+                    AgentAccessibilityService.instance?.waitForUiSettle(waitMs) ?: delay(waitMs)
                     executeAgentStep(uiState.userInput)
                 }
             }
@@ -549,7 +573,6 @@ object AgentController : ITgBridgeService, IAiConfigService {
         scope.launch(Dispatchers.IO) {
             var success = false
             var outputMsg: String? = null
-            AgentAccessibilityService.instance?.markActionStart()
             try {
                 when (action.type) {
                     AiAction.TYPE_CLICK -> {
@@ -558,23 +581,33 @@ object AgentController : ITgBridgeService, IAiConfigService {
                         withContext(Dispatchers.Main) {
                             svc?.click(action.x, action.y)
                         }
-                        AgentAccessibilityService.instance?.waitForUiStable(1500L) ?: delay(1500)
+                        AgentAccessibilityService.instance?.waitForUiSettle(1500L) ?: delay(1500)
                         val afterHash = svc?.captureScreenHierarchy()?.hashCode()
                         if (beforeHash != null && beforeHash == afterHash) {
                             // UI unchanged: capture screenshot so AI can see what is actually on
                             // screen rather than continuing to click elements it imagined.
                             val screenshot = captureScreenBase64()
                             consecutiveFailCount++
-                            val failNote = "Click at (${action.x},${action.y}) had no visible effect " +
-                                "(attempt $consecutiveFailCount/3). Look at the screenshot to see " +
-                                "what is actually on screen and choose a different element or approach."
-                            if (consecutiveFailCount >= 3) {
+                            val actionDesc = describeRepeatedAction(action)
+                            if (consecutiveFailCount >= 4) {
+                                // Agent kept repeating even after an explicit loopWarning: stop.
                                 withContext(Dispatchers.Main) {
-                                    addMessage("system", failNote, screenshotBase64 = screenshot)
-                                    addMessage("system", "Click failed 3 times with no effect. Agent stopped.")
+                                    addMessage("system", "点击无效超过4次，已停止。重复的动作：$actionDesc")
                                     stopAgent()
                                 }
+                            } else if (consecutiveFailCount >= 3) {
+                                // Third failure: embed a strong loopWarning in the UI tree context
+                                // so the agent sees exactly what it was repeating alongside the screen.
+                                val loopWarning = "你已经连续3次执行了同一个无效动作：$actionDesc。" +
+                                    "这个位置点击没有任何效果，请根据截图重新观察界面，" +
+                                    "找到正确的元素或换一种完全不同的方式来完成任务。"
+                                withContext(Dispatchers.Main) {
+                                    addMessage("system", "[点击无效-第3次] $loopWarning", screenshotBase64 = screenshot)
+                                }
+                                executeAgentStep(uiState.userInput, screenshotBase64 = screenshot, loopWarning = loopWarning)
                             } else {
+                                val failNote = "点击 (${action.x},${action.y}) 没有可见效果（第${consecutiveFailCount}次）。" +
+                                    "你刚才的动作：$actionDesc。请查看截图，选择不同的元素或方法。"
                                 withContext(Dispatchers.Main) {
                                     addMessage("system", failNote, screenshotBase64 = screenshot)
                                 }
@@ -997,7 +1030,7 @@ object AgentController : ITgBridgeService, IAiConfigService {
                 }
                 // click already waited inside its handler; other actions still need the settle wait
                 if (action.type != AiAction.TYPE_CLICK) {
-                    AgentAccessibilityService.instance?.waitForUiStable(2000L) ?: delay(2000)
+                    AgentAccessibilityService.instance?.waitForUiSettle(2000L) ?: delay(2000)
                 }
                 executeAgentStep(uiState.userInput)
             } else if (!isAgentRunning) {
@@ -1013,7 +1046,7 @@ object AgentController : ITgBridgeService, IAiConfigService {
                     withContext(Dispatchers.Main) {
                         addMessage("system", "Action failed (attempt $consecutiveFailCount/3): $finalMsg. Retrying with a different approach...")
                     }
-                    AgentAccessibilityService.instance?.waitForUiStable(1500L) ?: delay(1500)
+                    AgentAccessibilityService.instance?.waitForUiSettle(1500L) ?: delay(1500)
                     executeAgentStep(uiState.userInput)
                 }
             }
@@ -1061,6 +1094,28 @@ object AgentController : ITgBridgeService, IAiConfigService {
     }
 
     // --- Helpers ---
+
+    private fun describeRepeatedAction(action: AiAction): String {
+        val detail = when (action.type) {
+            AiAction.TYPE_CLICK -> "点击坐标 (${action.x}, ${action.y})"
+            AiAction.TYPE_SWIPE -> "滑动：(${action.x}, ${action.y}) → (${action.endX}, ${action.endY})"
+            AiAction.TYPE_LONG_PRESS -> "长按坐标 (${action.x}, ${action.y})"
+            AiAction.TYPE_TEXT_INPUT -> "输入文本「${action.text}」"
+            AiAction.TYPE_GLOBAL_ACTION -> "系统操作「${action.globalAction}」"
+            AiAction.TYPE_INTENT -> "启动「${action.packageName ?: action.action}」"
+            AiAction.TYPE_DPM -> "DPM 操作「${action.dpmAction}」"
+            AiAction.TYPE_DOWNLOAD -> "下载「${action.data}」"
+            AiAction.TYPE_HTTP_REQUEST -> "HTTP ${action.httpMethod} 请求「${action.data}」"
+            AiAction.TYPE_SCREENSHOT -> "截图"
+            AiAction.TYPE_WAIT -> "等待 ${action.duration}ms"
+            AiAction.TYPE_CAMERA -> "相机操作「${action.cameraAction}」"
+            AiAction.TYPE_SCREEN_RECORD -> "录屏操作「${action.screenRecordAction}」"
+            AiAction.TYPE_VOLUME -> "音量操作「${action.volumeAction}」"
+            else -> "动作类型「${action.type}」"
+        }
+        val reason = action.reason?.takeIf { it.isNotBlank() }
+        return if (reason != null) "$detail（你的理由：$reason）" else detail
+    }
 
     private suspend fun captureScreenBase64(): String? {
         val svc = AgentAccessibilityService.instance ?: return null

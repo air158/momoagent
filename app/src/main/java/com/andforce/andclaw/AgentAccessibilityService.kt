@@ -15,7 +15,14 @@ import android.view.Display
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.transformLatest
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.Executor
 
 @SuppressLint("AccessibilityPolicy")
@@ -25,19 +32,28 @@ class AgentAccessibilityService : AccessibilityService() {
         private const val TAG = "AiAccessibility"
     }
 
-    @Volatile var lastEventTimeMs: Long = 0L
+    private val _uiEventFlow = MutableSharedFlow<Int>(extraBufferCapacity = 64)
+    val uiEventFlow: SharedFlow<Int> = _uiEventFlow
 
     override fun onServiceConnected() { instance = this }
 
-    fun markActionStart() {
-        lastEventTimeMs = System.currentTimeMillis()
-    }
-
-    suspend fun waitForUiStable(maxWaitMs: Long = 2000L, stableWindowMs: Long = 200L) {
-        val deadline = System.currentTimeMillis() + maxWaitMs
-        while (System.currentTimeMillis() < deadline) {
-            delay(50)
-            if (System.currentTimeMillis() - lastEventTimeMs >= stableWindowMs) return
+    @OptIn(ExperimentalCoroutinesApi::class)
+    suspend fun waitForUiSettle(timeoutMs: Long = 1500L) {
+        withTimeoutOrNull(timeoutMs) {
+            uiEventFlow
+                .filter {
+                    it == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                    it == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                }
+                .transformLatest { type ->
+                    if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                        emit(Unit)
+                    } else {
+                        delay(200)
+                        emit(Unit)
+                    }
+                }
+                .first()
         }
     }
 
@@ -225,10 +241,7 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event != null && (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
-                event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)) {
-            lastEventTimeMs = System.currentTimeMillis()
-        }
+        event?.eventType?.let { _uiEventFlow.tryEmit(it) }
     }
 
     override fun onInterrupt() {}
